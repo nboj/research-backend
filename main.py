@@ -11,6 +11,7 @@ import numpy
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+from diffusers import StableDiffusionPipeline
 
 
 def save_heatmap(R, filepath, dpi=150):
@@ -70,14 +71,36 @@ class MobileNetResidualCanonizer(AttributeCanonizer):
         return out
 
 
-if __name__ == "__main__":
+def generate_sd_image(prompt: str, seed: int, steps: int = 30,
+                      out_path: str = "sd_image.png") -> Image.Image:
+    """Generate an image with SD‑v1‑4 and save it."""
+    SD_MODEL_ID = "CompVis/stable-diffusion-v1-4"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        SD_MODEL_ID,
+        torch_dtype=torch_dtype,
+        safety_checker=None,        # <- drop NSFW checker for speed (optional)
+    )
+    pipe = pipe.to(device)
+    pipe.enable_attention_slicing()  # lower VRAM
+
+    g = torch.Generator(device).manual_seed(seed)
+    image = pipe(prompt, num_inference_steps=steps,
+                 generator=g).images[0]          # PIL.Image
+
+    image.save(out_path)
+    return image
+
+
+def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974):
     matplotlib.use("Agg")
+    image = generate_sd_image(prompt, seed)
     weights = MobileNet_V2_Weights.IMAGENET1K_V1
     model = mobilenet_v2(weights=weights).eval().to("cpu")
 
-    img = Image.open("image.png")
-
-    x = weights.transforms()(Image.open("image.png")).unsqueeze(0).cpu()
+    x = weights.transforms()(image).unsqueeze(0).cpu()
 
     # canonizer = SequentialMergeBatchNorm()
     # composite = EpsilonPlus(
@@ -93,3 +116,7 @@ if __name__ == "__main__":
         relevance = attr(x)[1]
 
     save_heatmap(relevance[0], "lrp_heatmap.png")
+
+
+if __name__ == "__main__":
+    run()
