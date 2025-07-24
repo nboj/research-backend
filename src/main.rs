@@ -1,4 +1,8 @@
-use std::fmt::{self, Display, Formatter};
+use std::{
+    fmt::{self, Display, Formatter},
+    io::Error,
+    process::Command,
+};
 
 use async_openai::{
     Client,
@@ -29,15 +33,21 @@ struct GenerateProps {
 async fn generate(
     data: Json<GenerateProps>,
 ) -> Result<(Status, Json<String>), status::Custom<Json<ErrBody>>> {
-    let client = Client::new();
-
-    let request = match CreateImageRequestArgs::default()
-        .prompt("cats on sofa and carpet in living room")
-        .response_format(ImageResponseFormat::Url)
-        .size(ImageSize::S256x256)
-        .user("async-openai")
-        .build()
+    let mut handle = match Command::new("./venv/bin/python")
+        .arg("./src-py/main.py")
+        .arg(data.prompt.clone())
+        .arg(data.seed.clone())
+        .spawn()
     {
+        Ok(h) => h,
+        Err(e) => {
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(ErrBody::new(e.to_string())),
+            ));
+        }
+    };
+    let res = match handle.wait() {
         Ok(v) => v,
         Err(e) => {
             return Err(status::Custom(
@@ -46,32 +56,7 @@ async fn generate(
             ));
         }
     };
-    let response = match client.images().create(request).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
-        }
-    };
-
-    // Download and save images to ./data directory.
-    // Each url is downloaded and saved in dedicated Tokio task.
-    // Directory is created if it doesn't exist.
-    let paths = match response.save("./data").await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
-        }
-    };
-
-    paths
-        .iter()
-        .for_each(|path| println!("Image file path: {}", path.display()));
+    log::info!("Status Code: {res}");
     Ok((Status::Accepted, Json(String::from("Success"))))
 }
 
@@ -135,13 +120,13 @@ impl Display for Options {
             if pa.race.is_some() || pa.clothing.is_some() || pa.age.is_some() {
                 writeln!(f, "\t\tphysical_attributes: {{",)?;
                 if let Some(race) = &pa.race {
-                    writeln!(f, "\t\t\trace: \"{}\", ", race)?;
+                    writeln!(f, "\t\t\trace: \"{race}\", ")?;
                 }
                 if let Some(clothing) = &pa.clothing {
-                    writeln!(f, "\t\t\tclothing: \"{}\", ", clothing)?;
+                    writeln!(f, "\t\t\tclothing: \"{clothing}\", ")?;
                 }
                 if let Some(age) = &pa.age {
-                    writeln!(f, "\t\t\tage: \"{}\", ", age)?;
+                    writeln!(f, "\t\t\tage: \"{age}\", ")?;
                 }
                 writeln!(f, "\t\t}}",)?;
             }
@@ -271,10 +256,9 @@ async fn create_prompt(
         ---  
         FINAL_REWRITTEN_PROMPT:
         "#,
-        data.prompt,
-        data.options.to_string()
+        data.prompt, data.options
     );
-    log::info!("{}", prompt);
+    log::info!("{prompt}");
     let request = match CreateCompletionRequestArgs::default()
         .model("gpt-4o-mini-2024-07-18")
         .prompt(prompt)

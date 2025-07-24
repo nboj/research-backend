@@ -1,3 +1,4 @@
+import sys
 from zennit.layer import Sum
 from torchvision.models.mobilenetv2 import InvertedResidual
 from zennit.canonizers import SequentialMergeBatchNorm, AttributeCanonizer, CompositeCanonizer
@@ -119,4 +120,6 @@ def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974)
 
 
 if __name__ == "__main__":
-    run()
+    prompt = sys.argv[1]
+    seed = sys.argv[2]
+    run(prompt, int(seed))

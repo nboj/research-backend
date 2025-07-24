@@ -6,13 +6,17 @@
     url = "github:numtide/flake-utils";
     inputs.systems.follows = "systems";
   };
+  inputs.rust-overlay.url = "github:oxalica/rust-overlay";
 
   outputs =
-    { nixpkgs, flake-utils, ... }:
+    { nixpkgs, flake-utils, rust-overlay, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
         python = pkgs.python313;
       in
       {
@@ -23,6 +27,7 @@
             python.pkgs.virtualenv
             python.pkgs.pip
             pkgs.gcc.cc.lib
+            pkgs.rust-bin.stable.latest.default
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.gcc.cc.lib}/lib:$LD_LIBRARY_PATH
