@@ -5,7 +5,13 @@ edition = "2024"
 
 [dependencies]
 async-openai = "0.29.0"
+base64 = "0.22.1"
 dotenv = "0.15.0"
 env_logger = "0.11.8"
 log = "0.4.27"
 rocket = {version="0.5.1", features = ["json"]}
+[dependencies.uuid]
+version = "1.17.0"
+features = [
+	"v4"
+]

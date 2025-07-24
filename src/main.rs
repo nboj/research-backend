@@ -8,12 +8,15 @@ use async_openai::{
     Client,
     types::{CreateCompletionRequestArgs, CreateImageRequestArgs, ImageResponseFormat, ImageSize},
 };
+use base64::{Engine, engine::general_purpose};
 use dotenv::dotenv;
 use rocket::{
     http::Status,
     response::status,
     serde::{Deserialize, Serialize, json::Json},
+    tokio::fs::{create_dir_all, read, read_dir, remove_dir_all},
 };
+use uuid::Uuid;
 
 #[macro_use]
 extern crate rocket;
@@ -32,15 +35,28 @@ struct GenerateProps {
 #[post("/generate", data = "<data>")]
 async fn generate(
     data: Json<GenerateProps>,
-) -> Result<(Status, Json<String>), status::Custom<Json<ErrBody>>> {
+) -> Result<(Status, Json<Vec<String>>), status::Custom<Json<ErrBody>>> {
+    let id = Uuid::new_v4();
+    match create_dir_all(format!("./data/{id}")).await {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = remove_dir_all(format!("./data/{id}")).await;
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(ErrBody::new(e.to_string())),
+            ));
+        }
+    };
     let mut handle = match Command::new("./venv/bin/python")
         .arg("./src-py/main.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
+        .arg(format!("./data/{id}"))
         .spawn()
     {
         Ok(h) => h,
         Err(e) => {
+            let _ = remove_dir_all(format!("./data/{id}")).await;
             return Err(status::Custom(
                 Status::InternalServerError,
                 Json(ErrBody::new(e.to_string())),
@@ -50,6 +66,7 @@ async fn generate(
     let res = match handle.wait() {
         Ok(v) => v,
         Err(e) => {
+            let _ = remove_dir_all(format!("./data/{id}")).await;
             return Err(status::Custom(
                 Status::InternalServerError,
                 Json(ErrBody::new(e.to_string())),
@@ -57,7 +74,33 @@ async fn generate(
         }
     };
     log::info!("Status Code: {res}");
-    Ok((Status::Accepted, Json(String::from("Success"))))
+
+    let mut images_b64 = Vec::new();
+    let mut dir = match read_dir(format!("./data/{id}")).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = remove_dir_all(format!("./data/{id}")).await;
+            return Err(status::Custom(
+                Status::InternalServerError,
+                Json(ErrBody::new(e.to_string())),
+            ));
+        }
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let bytes = match read(entry.path()).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = remove_dir_all(format!("./data/{id}")).await;
+                return Err(status::Custom(
+                    Status::InternalServerError,
+                    Json(ErrBody::new(e.to_string())),
+                ));
+            }
+        };
+        images_b64.push(general_purpose::STANDARD.encode(bytes));
+    }
+    let _ = remove_dir_all(format!("./data/{id}")).await;
+    Ok((Status::Accepted, Json(images_b64)))
 }
 
 #[derive(Deserialize, Clone)]
@@ -285,10 +328,10 @@ async fn create_prompt(
     };
 
     println!("\nResponse (single):\n");
-    for choice in response.choices {
+    for choice in &response.choices {
         println!("{}", choice.text);
     }
-    Ok((Status::Accepted, Json(String::from("tsnreio"))))
+    Ok((Status::Accepted, Json(response.choices[0].clone().text)))
 }
 
 #[launch]

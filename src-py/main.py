@@ -95,9 +95,9 @@ def generate_sd_image(prompt: str, seed: int, steps: int = 30,
     return image
 
 
-def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974):
+def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974, path="/data"):
     matplotlib.use("Agg")
-    image = generate_sd_image(prompt, seed)
+    image = generate_sd_image(prompt, seed, out_path=f"{path}/image.png")
     weights = MobileNet_V2_Weights.IMAGENET1K_V1
     model = mobilenet_v2(weights=weights).eval().to("cpu")
 
@@ -116,10 +116,11 @@ def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974)
     with Gradient(model, composite) as attr:
         relevance = attr(x)[1]
 
-    save_heatmap(relevance[0], "lrp_heatmap.png")
+    save_heatmap(relevance[0], f"{path}/heatmap.png")
 
 
 if __name__ == "__main__":
     prompt = sys.argv[1]
     seed = sys.argv[2]
-    run(prompt, int(seed))
+    path = sys.argv[3]
+    run(prompt, int(seed), path)
