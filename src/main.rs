@@ -305,7 +305,7 @@ async fn create_prompt(
     let request = match CreateCompletionRequestArgs::default()
         .model("gpt-4o-mini-2024-07-18")
         .prompt(prompt)
-        .max_tokens(40_u32)
+        .max_tokens(60_u32)
         .build()
     {
         Ok(v) => v,
