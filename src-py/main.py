@@ -86,7 +86,7 @@ def generate_sd_image(prompt: str, seed: int, steps: int = 30,
     )
     pipe = pipe.to(device)
     pipe.enable_attention_slicing()  # lower VRAM
-    # pipe.enable_model_cpu_offload()  # (needs accelerate >= 0.20)
+    pipe.enable_model_cpu_offload()  # (needs accelerate >= 0.20)
 
     g = torch.Generator(device).manual_seed(seed)
     image = pipe(prompt, num_inference_steps=steps,

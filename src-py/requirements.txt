@@ -1,0 +1,7 @@
+diffusers
+matplotlib
+numpy
+Pillow
+torch
+torchvision
+zennit

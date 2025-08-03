@@ -47,7 +47,7 @@ async fn generate(
             ));
         }
     };
-    let mut handle = match Command::new("./venv/bin/python")
+    let mut handle = match Command::new("./venv/Scripts/python")
         .arg("./src-py/main.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
@@ -130,6 +130,8 @@ struct Options {
     technique: Option<Vec<String>>,
     lighting: Option<Vec<String>>,
     resolution: Option<Vec<String>>,
+    setting: Option<Vec<String>>,
+    angle: Option<Vec<String>>,
 }
 impl Display for Options {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -157,6 +159,8 @@ impl Display for Options {
         write_opt_vec!(self.technique, "technique");
         write_opt_vec!(self.lighting, "lighting");
         write_opt_vec!(self.resolution, "resolution");
+        write_opt_vec!(self.setting, "setting");
+        write_opt_vec!(self.angle, "angle");
 
         // physical attributes need a little extra handling
         if let Some(pa) = &self.physical_attributes {
