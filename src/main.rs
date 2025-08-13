@@ -1,5 +1,6 @@
 use std::{
     fmt::{self, Display, Formatter},
+    fs::FileType,
     io::Error,
     process::Command,
 };
@@ -13,7 +14,10 @@ use dotenv::dotenv;
 use rocket::{
     http::Status,
     response::status,
-    serde::{Deserialize, Serialize, json::Json},
+    serde::{
+        Deserialize, Serialize,
+        json::{Json, serde_json::json},
+    },
     tokio::fs::{create_dir_all, read, read_dir, remove_dir_all},
 };
 use uuid::Uuid;
@@ -29,13 +33,19 @@ struct GenerateProps {
     prompt: String,
 }
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct GenerateResponse {
+    images: Vec<String>,
+    tokens: Vec<String>,
+}
 // NOTE: needs
 // * userid
 // * prompt
 #[post("/generate", data = "<data>")]
 async fn generate(
     data: Json<GenerateProps>,
-) -> Result<(Status, Json<Vec<String>>), status::Custom<Json<ErrBody>>> {
+) -> Result<(Status, Json<GenerateResponse>), status::Custom<Json<ErrBody>>> {
     let id = Uuid::new_v4();
     match create_dir_all(format!("./data/{id}")).await {
         Ok(()) => {}
@@ -48,7 +58,7 @@ async fn generate(
         }
     };
     let mut handle = match Command::new("./venv/Scripts/python")
-        .arg("./src-py/main.py")
+        .arg("./src-py/maps.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
         .arg(format!("./data/{id}"))
@@ -75,8 +85,51 @@ async fn generate(
     };
     log::info!("Status Code: {res}");
 
-    let mut images_b64 = Vec::new();
-    let mut dir = match read_dir(format!("./data/{id}")).await {
+    let final_image = {
+        let mut dir = match read_dir(format!("./data/{id}")).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = remove_dir_all(format!("./data/{id}")).await;
+                return Err(status::Custom(
+                    Status::InternalServerError,
+                    Json(ErrBody::new(e.to_string())),
+                ));
+            }
+        };
+        loop {
+            if let Ok(Some(entry)) = dir.next_entry().await {
+                let filetype = match entry.file_type().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = remove_dir_all(format!("./data/{id}")).await;
+                        return Err(status::Custom(
+                            Status::InternalServerError,
+                            Json(ErrBody::new(e.to_string())),
+                        ));
+                    }
+                };
+                if filetype.is_file() {
+                    let bytes = match read(entry.path()).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = remove_dir_all(format!("./data/{id}")).await;
+                            return Err(status::Custom(
+                                Status::InternalServerError,
+                                Json(ErrBody::new(e.to_string())),
+                            ));
+                        }
+                    };
+                    break general_purpose::STANDARD.encode(bytes);
+                }
+            } else {
+                return Err(status::Custom(
+                    Status::InternalServerError,
+                    Json(ErrBody::new("Couldnt find final image".to_string())),
+                ));
+            }
+        }
+    };
+    let mut dir = match read_dir(format!("./data/{id}/heatmaps")).await {
         Ok(d) => d,
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
@@ -86,6 +139,10 @@ async fn generate(
             ));
         }
     };
+    let mut images = Vec::new();
+    let mut tokens = Vec::new();
+    let mut tokens_raw = Vec::new();
+    images.push(final_image);
     while let Ok(Some(entry)) = dir.next_entry().await {
         let bytes = match read(entry.path()).await {
             Ok(b) => b,
@@ -97,10 +154,36 @@ async fn generate(
                 ));
             }
         };
-        images_b64.push(general_purpose::STANDARD.encode(bytes));
+        let file_name = entry.file_name();
+        let name = file_name.to_str().unwrap_or_default();
+        if name.starts_with("token") {
+            // Parse the filename: token-index-token_value.png
+            let parts: Vec<&str> = name.split('-').collect();
+            if parts.len() >= 3 {
+                if let Ok(index) = parts[1].parse::<u32>() {
+                    let token_value = parts[2..].join("-").replace(".png", "");
+                    tokens_raw.push((index, token_value));
+                } else {
+                    log::error!("Could not parse index");
+                }
+            } else {
+                log::error!("Parsed len is less than 3 items");
+            }
+        }
+        images.push(general_purpose::STANDARD.encode(bytes));
     }
     let _ = remove_dir_all(format!("./data/{id}")).await;
-    Ok((Status::Accepted, Json(images_b64)))
+    tokens_raw.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, token) in tokens_raw {
+        log::info!("{token}");
+        tokens.push(token);
+    }
+    log::info!("{}, {}", tokens.len(), images.len());
+    let response = GenerateResponse {
+        tokens: tokens,
+        images: images,
+    };
+    Ok((Status::Accepted, Json(response)))
 }
 
 #[derive(Deserialize, Clone)]
@@ -301,7 +384,6 @@ async fn create_prompt(
         {}
 
         ---  
-        FINAL_REWRITTEN_PROMPT:
         "#,
         data.prompt, data.options
     );
