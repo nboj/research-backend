@@ -57,6 +57,7 @@ async fn generate(
             ));
         }
     };
+    log::info!("here");
     let mut handle = match Command::new("./venv/Scripts/python")
         .arg("./src-py/maps.py")
         .arg(data.prompt.clone())
@@ -73,6 +74,7 @@ async fn generate(
             ));
         }
     };
+    log::info!("now here");
     let res = match handle.wait() {
         Ok(v) => v,
         Err(e) => {
@@ -203,6 +205,45 @@ impl Default for PhysicalAttributes {
     }
 }
 
+fn generate_prompt_from_options(prompt: &String, options: &Options) -> String {
+    let mut out = String::from(prompt);
+    let mut vec: Vec<String> = Vec::new();
+    push_vec(&mut vec, &options.medium);
+    push_vec(&mut vec, &options.genre);
+    push_vec(&mut vec, &options.mood);
+    if let Some(physical_attributes) = &options.physical_attributes {
+        if let Some(age) = physical_attributes.age {
+            vec.push(format!("{age} years old"));
+        }
+        if let Some(race) = &physical_attributes.race {
+            vec.push(race.clone());
+        }
+        if let Some(clothing) = &physical_attributes.clothing {
+            vec.push(clothing.clone());
+        }
+    }
+    push_vec(&mut vec, &options.technique);
+    push_vec(&mut vec, &options.lighting);
+    push_vec(&mut vec, &options.resolution);
+    push_vec(&mut vec, &options.setting);
+    push_vec(&mut vec, &options.angle);
+    if !vec.is_empty() {
+        out += " -- ";
+        out += vec.join(", ").as_str();
+    }
+    out
+}
+
+fn push_vec(out: &mut Vec<String>, vec: &Option<Vec<String>>) {
+    if let Some(options) = vec {
+        let mut options = options.clone();
+        options.sort();
+        for option in options {
+            out.push(option.clone());
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct Options {
@@ -295,70 +336,19 @@ impl ErrBody {
 async fn create_prompt(
     data: Json<Generation>,
 ) -> Result<(Status, Json<String>), status::Custom<Json<ErrBody>>> {
-    log::info!("");
-    log::info!("Prompt: {}", data.prompt);
-    log::info!("Seed: {}", data.seed);
-    log::info!("UserID: {}", data.userid);
-    log::info!(
-        "opions.Medium: {}",
-        data.options.medium.clone().unwrap_or_default().join(", ")
-    );
-    log::info!(
-        "opions.Genre: {}",
-        data.options.genre.clone().unwrap_or_default().join(", ")
-    );
-    log::info!(
-        "opions.PhysicalAttributes: {}",
-        data.options
-            .physical_attributes
-            .clone()
-            .unwrap_or_default()
-            .age
-            .unwrap_or_default()
-    );
-    log::info!(
-        "opions.PhysicalAttributes: {}",
-        data.options
-            .physical_attributes
-            .clone()
-            .unwrap_or_default()
-            .race
-            .unwrap_or_default()
-    );
-    log::info!(
-        "opions.PhysicalAttributes: {}",
-        data.options
-            .physical_attributes
-            .clone()
-            .unwrap_or_default()
-            .clothing
-            .unwrap_or_default()
-    );
-    log::info!(
-        "opions.Mood: {}",
-        data.options.mood.clone().unwrap_or_default().join(", ")
-    );
-    log::info!(
-        "opions.Technique: {}",
-        data.options
-            .technique
-            .clone()
-            .unwrap_or_default()
-            .join(", ")
-    );
-    log::info!(
-        "opions.Lighting: {}",
-        data.options.lighting.clone().unwrap_or_default().join(", ")
-    );
-    log::info!(
-        "opions.Resolution: {}",
-        data.options
-            .resolution
-            .clone()
-            .unwrap_or_default()
-            .join(", ")
-    );
-    log::info!("");
+    let prompt = generate_prompt_from_options(&data.prompt, &data.options);
+    log::info!("{prompt}");
+    Ok((Status::Accepted, Json(prompt)))
+}
+// NOTE: needs
+// * userid
+// * prompt
+// * options
+// * seed
+#[post("/create-gpt-prompt", data = "<data>")]
+async fn create_gpt_prompt(
+    data: Json<Generation>,
+) -> Result<(Status, Json<String>), status::Custom<Json<ErrBody>>> {
     let client = Client::new();
     // single
     let prompt = format!(
@@ -427,5 +417,5 @@ fn rocket() -> _ {
         .filter_level(log::LevelFilter::Trace)
         .init();
     log::info!("----- START -----");
-    rocket::build().mount("/", routes![generate, create_prompt])
+    rocket::build().mount("/", routes![generate, create_prompt, create_gpt_prompt])
 }
