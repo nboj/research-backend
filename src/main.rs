@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::{self, Display, Formatter},
     fs::FileType,
     io::Error,
@@ -12,18 +13,36 @@ use async_openai::{
 use base64::{Engine, engine::general_purpose};
 use dotenv::dotenv;
 use rocket::{
-    http::Status,
+    http::{Status, ext::IntoCollection},
     response::status,
     serde::{
         Deserialize, Serialize,
         json::{Json, serde_json::json},
     },
-    tokio::fs::{create_dir_all, read, read_dir, remove_dir_all},
+    tokio::fs::{create_dir_all, read, read_dir, read_to_string, remove_dir_all},
 };
 use uuid::Uuid;
 
 #[macro_use]
 extern crate rocket;
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct TokenMap {
+    prompt: String,
+    tokens_all: Vec<String>,
+    mapping: Vec<MapEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct MapEntry {
+    word: String,
+    word_idx: usize,
+    token_indices: Vec<usize>,
+    tokens: Vec<String>, // display tokens (e.g., ["Ġdog"])
+    heatmap: String,     // e.g., "dog.heat_map.png"
+}
 
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -59,7 +78,7 @@ async fn generate(
     };
     log::info!("here");
     let mut handle = match Command::new("./venv/Scripts/python")
-        .arg("./src-py/maps.py")
+        .arg("./src-py/maps-test.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
         .arg(format!("./data/{id}"))
@@ -87,51 +106,7 @@ async fn generate(
     };
     log::info!("Status Code: {res}");
 
-    let final_image = {
-        let mut dir = match read_dir(format!("./data/{id}")).await {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = remove_dir_all(format!("./data/{id}")).await;
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(ErrBody::new(e.to_string())),
-                ));
-            }
-        };
-        loop {
-            if let Ok(Some(entry)) = dir.next_entry().await {
-                let filetype = match entry.file_type().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = remove_dir_all(format!("./data/{id}")).await;
-                        return Err(status::Custom(
-                            Status::InternalServerError,
-                            Json(ErrBody::new(e.to_string())),
-                        ));
-                    }
-                };
-                if filetype.is_file() {
-                    let bytes = match read(entry.path()).await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            let _ = remove_dir_all(format!("./data/{id}")).await;
-                            return Err(status::Custom(
-                                Status::InternalServerError,
-                                Json(ErrBody::new(e.to_string())),
-                            ));
-                        }
-                    };
-                    break general_purpose::STANDARD.encode(bytes);
-                }
-            } else {
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(ErrBody::new("Couldnt find final image".to_string())),
-                ));
-            }
-        }
-    };
-    let mut dir = match read_dir(format!("./data/{id}/heatmaps")).await {
+    let mut dir = match read_dir(format!("./data/{id}")).await {
         Ok(d) => d,
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
@@ -141,10 +116,9 @@ async fn generate(
             ));
         }
     };
-    let mut images = Vec::new();
-    let mut tokens = Vec::new();
-    let mut tokens_raw = Vec::new();
-    images.push(final_image);
+    let mut images_raw = Vec::new();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut result: Option<String> = None;
     while let Ok(Some(entry)) = dir.next_entry().await {
         let bytes = match read(entry.path()).await {
             Ok(b) => b,
@@ -156,37 +130,219 @@ async fn generate(
                 ));
             }
         };
+
+        //let path = entry.path();
         let file_name = entry.file_name();
-        let name = file_name.to_str().unwrap_or_default();
-        if name.starts_with("token") {
-            // Parse the filename: token-index-token_value.png
-            let parts: Vec<&str> = name.split('-').collect();
-            if parts.len() >= 3 {
-                if let Ok(index) = parts[1].parse::<u32>() {
-                    let token_value = parts[2..].join("-").replace(".png", "");
-                    tokens_raw.push((index, token_value));
+        let name = file_name.to_str().unwrap_or_default().to_string();
+        let split: Vec<&str> = name.split('.').collect();
+        if split.len() > 1 && split[1] == "heat_map" {
+            images_raw.push((name, general_purpose::STANDARD.encode(bytes)));
+        } else if name == "output.png" {
+            result = Some(general_purpose::STANDARD.encode(bytes));
+        }
+    }
+
+    let result = if let Some(result) = result {
+        result
+    } else {
+        let _ = remove_dir_all(format!("./data/{id}")).await;
+        return Err(status::Custom(
+            Status::InternalServerError,
+            Json(ErrBody::new("Result was none".to_string())),
+        ));
+    };
+    let mut images: Vec<String> = vec![result];
+
+    let mut by_name: HashMap<String, String> = HashMap::new();
+    for (name, img_b64) in &images_raw {
+        by_name.insert(name.clone(), img_b64.clone());
+    }
+
+    let token_map_path = format!("./data/{id}/token_map.json");
+    let token_map: Option<TokenMap> = match read_to_string(&token_map_path).await {
+        Ok(s) => match rocket::serde::json::from_str(&s) {
+            Ok(tm) => Some(tm),
+            Err(e) => {
+                log::warn!("Failed to parse token_map.json: {e}");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    if let Some(tm) = token_map {
+        for m in tm.mapping {
+            if let Some(img_b64) = by_name.get(&m.heatmap) {
+                images.push(img_b64.clone());
+                // join subword display tokens for UI; tweak joiner if you prefer
+                tokens.push(if m.tokens.is_empty() {
+                    m.word
                 } else {
-                    log::error!("Could not parse index");
-                }
+                    m.tokens.join("") // e.g., "Ġbasket" + "ball" -> "Ġbasketball"
+                });
             } else {
-                log::error!("Parsed len is less than 3 items");
+                log::warn!("No heatmap file for {}", m.heatmap);
             }
         }
-        images.push(general_purpose::STANDARD.encode(bytes));
+    } else {
+        let _ = remove_dir_all(format!("./data/{id}")).await;
+        return Err(status::Custom(
+            Status::InternalServerError,
+            Json(ErrBody::new("Could not find token map".to_string())),
+        ));
     }
     let _ = remove_dir_all(format!("./data/{id}")).await;
-    tokens_raw.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, token) in tokens_raw {
-        log::info!("{token}");
-        tokens.push(token);
-    }
-    log::info!("{}, {}", tokens.len(), images.len());
+    //log::info!("{}, {}", tokens.len(), images_raw.len());
     let response = GenerateResponse {
         tokens: tokens,
         images: images,
     };
     Ok((Status::Accepted, Json(response)))
 }
+//#[post("/generate", data = "<data>")]
+//async fn generate(
+//    data: Json<GenerateProps>,
+//) -> Result<(Status, Json<GenerateResponse>), status::Custom<Json<ErrBody>>> {
+//    let id = Uuid::new_v4();
+//    match create_dir_all(format!("./data/{id}")).await {
+//        Ok(()) => {}
+//        Err(e) => {
+//            let _ = remove_dir_all(format!("./data/{id}")).await;
+//            return Err(status::Custom(
+//                Status::InternalServerError,
+//                Json(ErrBody::new(e.to_string())),
+//            ));
+//        }
+//    };
+//    log::info!("here");
+//    let mut handle = match Command::new("./venv/Scripts/python")
+//        .arg("./src-py/maps.py")
+//        .arg(data.prompt.clone())
+//        .arg(data.seed.clone())
+//        .arg(format!("./data/{id}"))
+//        .spawn()
+//    {
+//        Ok(h) => h,
+//        Err(e) => {
+//            let _ = remove_dir_all(format!("./data/{id}")).await;
+//            return Err(status::Custom(
+//                Status::InternalServerError,
+//                Json(ErrBody::new(e.to_string())),
+//            ));
+//        }
+//    };
+//    log::info!("now here");
+//    let res = match handle.wait() {
+//        Ok(v) => v,
+//        Err(e) => {
+//            let _ = remove_dir_all(format!("./data/{id}")).await;
+//            return Err(status::Custom(
+//                Status::InternalServerError,
+//                Json(ErrBody::new(e.to_string())),
+//            ));
+//        }
+//    };
+//    log::info!("Status Code: {res}");
+//
+//    let final_image = {
+//        let mut dir = match read_dir(format!("./data/{id}")).await {
+//            Ok(d) => d,
+//            Err(e) => {
+//                let _ = remove_dir_all(format!("./data/{id}")).await;
+//                return Err(status::Custom(
+//                    Status::InternalServerError,
+//                    Json(ErrBody::new(e.to_string())),
+//                ));
+//            }
+//        };
+//        loop {
+//            if let Ok(Some(entry)) = dir.next_entry().await {
+//                let filetype = match entry.file_type().await {
+//                    Ok(t) => t,
+//                    Err(e) => {
+//                        let _ = remove_dir_all(format!("./data/{id}")).await;
+//                        return Err(status::Custom(
+//                            Status::InternalServerError,
+//                            Json(ErrBody::new(e.to_string())),
+//                        ));
+//                    }
+//                };
+//                if filetype.is_file() {
+//                    let bytes = match read(entry.path()).await {
+//                        Ok(b) => b,
+//                        Err(e) => {
+//                            let _ = remove_dir_all(format!("./data/{id}")).await;
+//                            return Err(status::Custom(
+//                                Status::InternalServerError,
+//                                Json(ErrBody::new(e.to_string())),
+//                            ));
+//                        }
+//                    };
+//                    break general_purpose::STANDARD.encode(bytes);
+//                }
+//            } else {
+//                return Err(status::Custom(
+//                    Status::InternalServerError,
+//                    Json(ErrBody::new("Couldnt find final image".to_string())),
+//                ));
+//            }
+//        }
+//    };
+//    let mut dir = match read_dir(format!("./data/{id}/heatmaps")).await {
+//        Ok(d) => d,
+//        Err(e) => {
+//            let _ = remove_dir_all(format!("./data/{id}")).await;
+//            return Err(status::Custom(
+//                Status::InternalServerError,
+//                Json(ErrBody::new(e.to_string())),
+//            ));
+//        }
+//    };
+//    let mut images = Vec::new();
+//    let mut tokens = Vec::new();
+//    let mut tokens_raw = Vec::new();
+//    images.push(final_image);
+//    while let Ok(Some(entry)) = dir.next_entry().await {
+//        let bytes = match read(entry.path()).await {
+//            Ok(b) => b,
+//            Err(e) => {
+//                let _ = remove_dir_all(format!("./data/{id}")).await;
+//                return Err(status::Custom(
+//                    Status::InternalServerError,
+//                    Json(ErrBody::new(e.to_string())),
+//                ));
+//            }
+//        };
+//        let file_name = entry.file_name();
+//        let name = file_name.to_str().unwrap_or_default();
+//        if name.starts_with("token") {
+//            // Parse the filename: token-index-token_value.png
+//            let parts: Vec<&str> = name.split('-').collect();
+//            if parts.len() >= 3 {
+//                if let Ok(index) = parts[1].parse::<u32>() {
+//                    let token_value = parts[2..].join("-").replace(".png", "");
+//                    tokens_raw.push((index, token_value));
+//                } else {
+//                    log::error!("Could not parse index");
+//                }
+//            } else {
+//                log::error!("Parsed len is less than 3 items");
+//            }
+//        }
+//        images.push(general_purpose::STANDARD.encode(bytes));
+//    }
+//    let _ = remove_dir_all(format!("./data/{id}")).await;
+//    tokens_raw.sort_by(|a, b| a.0.cmp(&b.0));
+//    for (_, token) in tokens_raw {
+//        log::info!("{token}");
+//        tokens.push(token);
+//    }
+//    log::info!("{}, {}", tokens.len(), images.len());
+//    let response = GenerateResponse {
+//        tokens: tokens,
+//        images: images,
+//    };
+//    Ok((Status::Accepted, Json(response)))
+//}
 
 #[derive(Deserialize, Clone)]
 #[serde(crate = "rocket::serde")]

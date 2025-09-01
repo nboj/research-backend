@@ -1,0 +1,173 @@
+{
+  "prompt": "A red rose -- Photograph, Photorealistic, Beautiful, Radiant Light, 100 mm, 16K, Sharp Focus, Forest, Close Up",
+  "tokens_all": [
+    "a</w>",
+    "red</w>",
+    "rose</w>",
+    "--</w>",
+    "photograph</w>",
+    ",</w>",
+    "photo",
+    "realistic</w>",
+    ",</w>",
+    "beautiful</w>",
+    ",</w>",
+    "radiant</w>",
+    "light</w>",
+    ",</w>",
+    "1</w>",
+    "0</w>",
+    "0</w>",
+    "mm</w>",
+    ",</w>",
+    "1</w>",
+    "6</w>",
+    "k</w>",
+    ",</w>",
+    "sharp</w>",
+    "focus</w>",
+    ",</w>",
+    "forest</w>",
+    ",</w>",
+    "close</w>",
+    "up</w>"
+  ],
+  "mapping": [
+    {
+      "word": "A",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "a.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "red",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "red.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "rose",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "rose.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "--",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "--.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Photograph,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "photograph,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Photorealistic,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "photorealistic,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Beautiful,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "beautiful,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Radiant",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "radiant.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Light,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "light,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "100",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "100.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "mm,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "mm,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "16K,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "16k,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Sharp",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "sharp.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Focus,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "focus,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Forest,",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "forest,.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Close",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "close.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "Up",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "up.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    }
+  ]
+}
