@@ -1,0 +1,34 @@
+{
+  "prompt": "A red rose",
+  "tokens_all": [
+    "a</w>",
+    "red</w>",
+    "rose</w>"
+  ],
+  "mapping": [
+    {
+      "word": "A",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "a.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "red",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "red.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    },
+    {
+      "word": "rose",
+      "word_idx": 0,
+      "token_indices": [],
+      "tokens": [],
+      "heatmap": "rose.heat_map.png",
+      "error": "list indices must be integers or slices, not list"
+    }
+  ]
+}

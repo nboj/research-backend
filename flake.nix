@@ -31,6 +31,8 @@
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.gcc.cc.lib}/lib:$LD_LIBRARY_PATH
+            export LD_LIBRARY_PATH=/run/opengl-driver/lib:/run/opengl-driver-32/lib:$LD_LIBRARY_PATH
+            source ./venv/bin/activate
           '';
         };
       }
