@@ -77,7 +77,7 @@ async fn generate(
         }
     };
     log::info!("here");
-    let mut handle = match Command::new("./venv/bin/python")
+    let mut handle = match Command::new("./venv/Scripts/python")
         .arg("./src-py/maps-test.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
@@ -138,7 +138,7 @@ async fn generate(
         if name == "output.png" {
             result = Some(general_purpose::STANDARD.encode(bytes));
             continue;
-        } else if split.len() > 2 && split[split.len()-2] == "heat_map" {
+        } else if split.len() > 2 && split[split.len() - 2] == "heat_map" {
             images_raw.push((name, general_purpose::STANDARD.encode(bytes)));
         }
     }

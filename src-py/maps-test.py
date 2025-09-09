@@ -29,9 +29,8 @@ def write_token_map(path: str, prompt: str, tokenizer):
       }
     """
     out_dir = Path(path)
-    toks = tokenizer.tokenize(prompt)  # CLIP display tokens (no specials)
+    toks = tokenizer.tokenize(prompt)
 
-    # keep track of repeated words: word_idx = 0,1,2,...
     counts = defaultdict(int)
     mapping = []
     for word in prompt.split():
@@ -48,7 +47,6 @@ def write_token_map(path: str, prompt: str, tokenizer):
                 "heatmap": f"{word.lower()}.heat_map.png",
             }
         except Exception as e:
-            # still emit a record so Rust can skip/match gracefully
             entry = {
                 "word": word,
                 "word_idx": idx,
@@ -75,11 +73,11 @@ def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974,
         model_id, use_auth_token=True, torch_dtype=torch.float16, use_safetensors=True, variant='fp16')
     pipe = pipe.to(device)
 
-    gen = set_seed(seed)  # for reproducibility
+    gen = set_seed(seed)
     with trace(pipe) as tc:
         pipe(prompt)
         exp = tc.to_experiment(path)
-        exp.save()  # experiment-dir now contains all the data and heat maps
+        exp.save()
         write_token_map(path, prompt, pipe.tokenizer)
 
     # exp = GenerationExperiment.load(path)  # load the experiment
