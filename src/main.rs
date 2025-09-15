@@ -77,7 +77,7 @@ async fn generate(
         }
     };
     log::info!("here");
-    let mut handle = match Command::new("./venv/Scripts/python")
+    let mut handle = match Command::new("./venv/bin/python")
         .arg("./src-py/maps-test.py")
         .arg(data.prompt.clone())
         .arg(data.seed.clone())
