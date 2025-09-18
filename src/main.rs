@@ -567,6 +567,15 @@ async fn create_gpt_prompt(
     Ok((Status::Accepted, Json(response.choices[0].clone().text)))
 }
 
+#[get("/ws-connect")]
+async fn ws_connect(ws: ws::WebSocket)-> ws::Stream!['static] {
+    ws::Stream! {ws => 
+        for await message in ws {
+            yield ws::Message::Text("testing".to_string());
+        }
+    }
+}
+
 #[launch]
 fn rocket() -> _ {
     dotenv().ok();
@@ -574,5 +583,5 @@ fn rocket() -> _ {
         .filter_level(log::LevelFilter::Trace)
         .init();
     log::info!("----- START -----");
-    rocket::build().mount("/", routes![generate, create_prompt, create_gpt_prompt])
+    rocket::build().mount("/", routes![generate, create_prompt, create_gpt_prompt, ws_connect])
 }

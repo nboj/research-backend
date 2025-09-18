@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ws = { package = "rocket_ws", version = "0.1.1" }
 async-openai = "0.29.0"
 base64 = "0.22.1"
 dotenv = "0.15.0"
