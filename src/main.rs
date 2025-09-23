@@ -1,9 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt::{self, Display, Formatter},
     fs::FileType,
     io::Error,
     process::Command,
+    thread,
+    time::Duration,
 };
 
 use async_openai::{
@@ -13,15 +15,26 @@ use async_openai::{
 use base64::{Engine, engine::general_purpose};
 use dotenv::dotenv;
 use rocket::{
+    State,
+    futures::{SinkExt, StreamExt, executor::block_on},
     http::{Status, ext::IntoCollection},
     response::status,
     serde::{
-        Deserialize, Serialize,
-        json::{Json, serde_json::json},
+        self, Deserialize, Serialize,
+        json::{self, Json, serde_json::json},
     },
-    tokio::fs::{create_dir_all, read, read_dir, read_to_string, remove_dir_all},
+    tokio::{
+        self,
+        fs::{create_dir_all, read, read_dir, read_to_string, remove_dir_all},
+        sync::{
+            Mutex, RwLock,
+            mpsc::{Sender, channel},
+        },
+    },
 };
+use std::sync::Arc;
 use uuid::Uuid;
+use ws::Message;
 
 #[macro_use]
 extern crate rocket;
@@ -58,22 +71,22 @@ struct GenerateResponse {
     images: Vec<String>,
     tokens: Vec<String>,
 }
-// NOTE: needs
-// * userid
-// * prompt
-#[post("/generate", data = "<data>")]
-async fn generate(
-    data: Json<GenerateProps>,
-) -> Result<(Status, Json<GenerateResponse>), status::Custom<Json<ErrBody>>> {
+
+enum GenerateErr {
+    Generic { msg: String },
+}
+
+async fn generate(data: Generate) -> Result<GenerateResponse, GenerateErr> {
     let id = Uuid::new_v4();
     match create_dir_all(format!("./data/{id}")).await {
         Ok(()) => {}
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
+            return Err(GenerateErr::Generic { msg: e.to_string() });
+            //return Err(status::Custom(
+            //    Status::InternalServerError,
+            //    Json(ErrBody::new(e.to_string())),
+            //));
         }
     };
     log::info!("here");
@@ -87,10 +100,11 @@ async fn generate(
         Ok(h) => h,
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
+            return Err(GenerateErr::Generic { msg: e.to_string() });
+            //return Err(status::Custom(
+            //    Status::InternalServerError,
+            //    Json(ErrBody::new(e.to_string())),
+            //));
         }
     };
     log::info!("now here");
@@ -98,10 +112,11 @@ async fn generate(
         Ok(v) => v,
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
+            return Err(GenerateErr::Generic { msg: e.to_string() });
+            //return Err(status::Custom(
+            //    Status::InternalServerError,
+            //    Json(ErrBody::new(e.to_string())),
+            //));
         }
     };
     log::info!("Status Code: {res}");
@@ -110,10 +125,11 @@ async fn generate(
         Ok(d) => d,
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
-            return Err(status::Custom(
-                Status::InternalServerError,
-                Json(ErrBody::new(e.to_string())),
-            ));
+            return Err(GenerateErr::Generic { msg: e.to_string() });
+            //return Err(status::Custom(
+            //    Status::InternalServerError,
+            //    Json(ErrBody::new(e.to_string())),
+            //));
         }
     };
     let mut images_raw = Vec::new();
@@ -124,10 +140,11 @@ async fn generate(
             Ok(b) => b,
             Err(e) => {
                 let _ = remove_dir_all(format!("./data/{id}")).await;
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(ErrBody::new(e.to_string())),
-                ));
+                return Err(GenerateErr::Generic { msg: e.to_string() });
+                //return Err(status::Custom(
+                //    Status::InternalServerError,
+                //    Json(ErrBody::new(e.to_string())),
+                //));
             }
         };
 
@@ -147,10 +164,13 @@ async fn generate(
         result
     } else {
         let _ = remove_dir_all(format!("./data/{id}")).await;
-        return Err(status::Custom(
-            Status::InternalServerError,
-            Json(ErrBody::new("Result was none".to_string())),
-        ));
+        return Err(GenerateErr::Generic {
+            msg: "Result was none".to_string(),
+        });
+        //return Err(status::Custom(
+        //    Status::InternalServerError,
+        //    Json(ErrBody::new("Result was none".to_string())),
+        //));
     };
     let mut images: Vec<String> = vec![result];
 
@@ -186,10 +206,13 @@ async fn generate(
         }
     } else {
         let _ = remove_dir_all(format!("./data/{id}")).await;
-        return Err(status::Custom(
-            Status::InternalServerError,
-            Json(ErrBody::new("Could not find token map".to_string())),
-        ));
+        return Err(GenerateErr::Generic {
+            msg: "Could not find token map".to_string(),
+        });
+        //return Err(status::Custom(
+        //    Status::InternalServerError,
+        //    Json(ErrBody::new("Could not find token map".to_string())),
+        //));
     }
     let _ = remove_dir_all(format!("./data/{id}")).await;
     //log::info!("{}, {}", tokens.len(), images_raw.len());
@@ -197,7 +220,36 @@ async fn generate(
         tokens: tokens,
         images: images,
     };
-    Ok((Status::Accepted, Json(response)))
+    //Ok((Status::Accepted, Json(response)))
+    Ok(response)
+}
+
+// NOTE: needs
+// * userid
+// * prompt
+#[post("/generate", data = "<data>")]
+async fn generate_request(
+    data: Json<GenerateProps>,
+) -> Result<(Status, Json<GenerateResponse>), status::Custom<Json<ErrBody>>> {
+    match generate(Generate {
+        userid: data.userid.clone(),
+        prompt: data.prompt.clone(),
+        seed: data.seed.clone(),
+    })
+    .await
+    {
+        Ok(v) => {
+            return Ok((Status::Accepted, Json(v)));
+        }
+        Err(e) => match e {
+            GenerateErr::Generic { msg } => {
+                return Err(status::Custom(
+                    Status::InternalServerError,
+                    Json(ErrBody::new(msg)),
+                ));
+            }
+        },
+    }
 }
 //#[post("/generate", data = "<data>")]
 //async fn generate(
@@ -567,21 +619,139 @@ async fn create_gpt_prompt(
     Ok((Status::Accepted, Json(response.choices[0].clone().text)))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", crate = "rocket::serde")]
+struct Generate {
+    userid: String,
+    prompt: String,
+    seed: String,
+}
+
+struct AppState {
+    job_queue: Arc<RwLock<VecDeque<WSJob<Generate>>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", crate = "rocket::serde")]
+enum ClientMsg {
+    Generate {
+        prompt: String,
+        userid: String,
+        seed: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", crate = "rocket::serde")]
+enum ServerMsg {
+    GenerationComplete,
+}
+
+struct WSJob<T> {
+    job_id: Uuid,
+    data: T,
+    transmitter: Sender<ServerMsg>,
+}
+
 #[get("/ws-connect")]
-async fn ws_connect(ws: ws::WebSocket)-> ws::Stream!['static] {
-    ws::Stream! {ws => 
-        for await message in ws {
-            yield ws::Message::Text("testing".to_string());
-        }
-    }
+async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'static> {
+    let job_queue = state.job_queue.clone();
+    ws.channel(move |mut stream| {
+        Box::pin(async move {
+            let (mut sink, mut source) = stream.split();
+            let (tx, mut rx) = channel::<ServerMsg>(128);
+            tokio::spawn(async move {
+                while let (message) = rx.recv().await {
+                    if let Some(message) = message {
+                        let err = sink
+                            .send(Message::Text(json::to_string(&message).unwrap()))
+                            .await;
+                        if let Err(err) = err {
+                            log::error!("{err}");
+                        }
+                    }
+                }
+                rx.close();
+            });
+            while let Some(frame) = source.next().await {
+                match frame {
+                    Ok(Message::Text(ref s)) => match json::from_str(s.as_str()) {
+                        Ok(ClientMsg::Generate {
+                            prompt,
+                            userid,
+                            seed,
+                        }) => {
+                            log::info!("prompt={}", prompt);
+                            {
+                                let mut job_queue_guard = job_queue.write().await;
+                                job_queue_guard.push_back(WSJob {
+                                    job_id: Uuid::new_v4(),
+                                    data: Generate {
+                                        prompt,
+                                        userid,
+                                        seed,
+                                    },
+                                    transmitter: tx.clone(),
+                                });
+                            }
+                        }
+                        _ => {
+                            log::error!("Unhandled message type: {}", frame.unwrap());
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+    })
 }
 
 #[launch]
 fn rocket() -> _ {
     dotenv().ok();
     env_logger::builder()
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::Debug)
         .init();
     log::info!("----- START -----");
-    rocket::build().mount("/", routes![generate, create_prompt, create_gpt_prompt, ws_connect])
+    let job_queue = Arc::new(RwLock::new(VecDeque::<WSJob<Generate>>::new()));
+    let job_queue_clone = job_queue.clone();
+    std::thread::spawn(move || {
+        loop {
+            let front = {
+                let mut queue = job_queue_clone.blocking_write();
+                queue.pop_front()
+            };
+            if let Some(front) = front {
+                log::info!("FOUND FRONT: {}, {:?}", front.job_id, front.data);
+                block_on(async move {
+                    match generate(front.data).await {
+                        Ok(_res) => {
+                            let err = front.transmitter.send(ServerMsg::GenerationComplete).await;
+                            if let Err(err) = err {
+                                log::error!("Error sending event: {err}");
+                            }
+                        }
+                        Err(e) => {
+                            match e {
+                                GenerateErr::Generic { msg } => {
+                                    log::error!("Error sending event: {msg}");
+                                }
+                            }
+                        }
+                    }
+                })
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+    rocket::build().manage(AppState { job_queue }).mount(
+        "/",
+        routes![
+            generate_request,
+            create_prompt,
+            create_gpt_prompt,
+            ws_connect
+        ],
+    )
 }
