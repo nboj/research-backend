@@ -16,6 +16,7 @@ use base64::{Engine, engine::general_purpose};
 use dotenv::dotenv;
 use rocket::{
     State,
+    fairing::AdHoc,
     futures::{SinkExt, StreamExt, executor::block_on},
     http::{Status, ext::IntoCollection},
     response::status,
@@ -30,6 +31,7 @@ use rocket::{
             Mutex, RwLock,
             mpsc::{Sender, channel},
         },
+        time::interval,
     },
 };
 use std::sync::Arc;
@@ -76,7 +78,7 @@ enum GenerateErr {
     Generic { msg: String },
 }
 
-async fn generate(data: Generate) -> Result<GenerateResponse, GenerateErr> {
+async fn generate(data: &Generate) -> Result<GenerateResponse, GenerateErr> {
     let id = Uuid::new_v4();
     match create_dir_all(format!("./data/{id}")).await {
         Ok(()) => {}
@@ -108,17 +110,26 @@ async fn generate(data: Generate) -> Result<GenerateResponse, GenerateErr> {
         }
     };
     log::info!("now here");
-    let res = match handle.wait() {
-        Ok(v) => v,
+    let res = tokio::task::spawn_blocking(move || handle.wait()).await;
+    let res = match res {
+        Ok(v) => match v {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = remove_dir_all(format!("./data/{id}")).await;
+                return Err(GenerateErr::Generic { msg: e.to_string() });
+            }
+        },
         Err(e) => {
             let _ = remove_dir_all(format!("./data/{id}")).await;
             return Err(GenerateErr::Generic { msg: e.to_string() });
-            //return Err(status::Custom(
-            //    Status::InternalServerError,
-            //    Json(ErrBody::new(e.to_string())),
-            //));
         }
     };
+
+    //return Err(status::Custom(
+    //    Status::InternalServerError,
+    //    Json(ErrBody::new(e.to_string())),
+    //));
+
     log::info!("Status Code: {res}");
 
     let mut dir = match read_dir(format!("./data/{id}")).await {
@@ -227,30 +238,6 @@ async fn generate(data: Generate) -> Result<GenerateResponse, GenerateErr> {
 // NOTE: needs
 // * userid
 // * prompt
-#[post("/generate", data = "<data>")]
-async fn generate_request(
-    data: Json<GenerateProps>,
-) -> Result<(Status, Json<GenerateResponse>), status::Custom<Json<ErrBody>>> {
-    match generate(Generate {
-        userid: data.userid.clone(),
-        prompt: data.prompt.clone(),
-        seed: data.seed.clone(),
-    })
-    .await
-    {
-        Ok(v) => {
-            return Ok((Status::Accepted, Json(v)));
-        }
-        Err(e) => match e {
-            GenerateErr::Generic { msg } => {
-                return Err(status::Custom(
-                    Status::InternalServerError,
-                    Json(ErrBody::new(msg)),
-                ));
-            }
-        },
-    }
-}
 //#[post("/generate", data = "<data>")]
 //async fn generate(
 //    data: Json<GenerateProps>,
@@ -397,7 +384,7 @@ async fn generate_request(
 //    Ok((Status::Accepted, Json(response)))
 //}
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug, Serialize)]
 #[serde(crate = "rocket::serde")]
 struct PhysicalAttributes {
     race: Option<String>,
@@ -453,7 +440,7 @@ fn push_vec(out: &mut Vec<String>, vec: &Option<Vec<String>>) {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 #[serde(crate = "rocket::serde")]
 struct Options {
     medium: Option<Vec<String>>,
@@ -623,8 +610,11 @@ async fn create_gpt_prompt(
 #[serde(tag = "type", rename_all = "snake_case", crate = "rocket::serde")]
 struct Generate {
     userid: String,
+    comparison_id: String,
+    generation_id: String,
     prompt: String,
     seed: String,
+    options: Options,
 }
 
 struct AppState {
@@ -636,8 +626,11 @@ struct AppState {
 enum ClientMsg {
     Generate {
         prompt: String,
+        comparison_id: String,
+        generation_id: String,
         userid: String,
         seed: String,
+        options: Options,
     },
 }
 
@@ -661,15 +654,13 @@ async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'
             let (mut sink, mut source) = stream.split();
             let (tx, mut rx) = channel::<ServerMsg>(128);
             tokio::spawn(async move {
-                while let (message) = rx.recv().await {
-                    if let Some(message) = message {
+                while let Some(message) = rx.recv().await {
                         let err = sink
                             .send(Message::Text(json::to_string(&message).unwrap()))
                             .await;
                         if let Err(err) = err {
                             log::error!("{err}");
                         }
-                    }
                 }
                 rx.close();
             });
@@ -678,8 +669,11 @@ async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'
                     Ok(Message::Text(ref s)) => match json::from_str(s.as_str()) {
                         Ok(ClientMsg::Generate {
                             prompt,
+                            comparison_id,
+                            generation_id,
                             userid,
                             seed,
+                            options,
                         }) => {
                             log::info!("prompt={}", prompt);
                             {
@@ -688,8 +682,11 @@ async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'
                                     job_id: Uuid::new_v4(),
                                     data: Generate {
                                         prompt,
+                                        comparison_id,
+                                        generation_id,
                                         userid,
                                         seed,
+                                        options,
                                     },
                                     transmitter: tx.clone(),
                                 });
@@ -707,51 +704,114 @@ async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'
     })
 }
 
+async fn upload_png_b64(
+    s3: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    b64: &str,
+) -> Result<(), aws_sdk_s3::Error> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .expect("bad base64");
+    s3.put_object()
+        .bucket(bucket)
+        .key(key)
+        .body(bytes.into())
+        .content_type("image/png")
+        .send()
+        .await?;
+    Ok(())
+}
+
 #[launch]
-fn rocket() -> _ {
+async fn rocket() -> _ {
     dotenv().ok();
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Info)
         .init();
     log::info!("----- START -----");
     let job_queue = Arc::new(RwLock::new(VecDeque::<WSJob<Generate>>::new()));
     let job_queue_clone = job_queue.clone();
-    std::thread::spawn(move || {
-        loop {
-            let front = {
-                let mut queue = job_queue_clone.blocking_write();
-                queue.pop_front()
-            };
-            if let Some(front) = front {
-                log::info!("FOUND FRONT: {}, {:?}", front.job_id, front.data);
-                block_on(async move {
-                    match generate(front.data).await {
-                        Ok(_res) => {
-                            let err = front.transmitter.send(ServerMsg::GenerationComplete).await;
-                            if let Err(err) = err {
-                                log::error!("Error sending event: {err}");
+    rocket::build()
+        .manage(AppState { job_queue })
+        .attach(AdHoc::on_ignite("queue-worker", |rocket| async {
+            tokio::spawn(async move {
+                let db = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(10)
+                    .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+                    .await
+                    .expect("db connect");
+                let config = aws_config::load_from_env().await;
+                let s3 = aws_sdk_s3::Client::new(&config);
+                let bucket = std::env::var("BUCKET").expect("BUCKET");
+                let mut tick = interval(Duration::from_secs(1));
+                loop {
+                    tick.tick().await;
+                    let front = {
+                        let mut queue = job_queue_clone.write().await;
+                        queue.pop_front()
+                    };
+                    if let Some(front) = front {
+                        log::info!("FOUND FRONT: {}, {:?}", front.job_id, front.data);
+                        match generate(&front.data).await {
+                            Ok(res) => {
+                                log::info!("FINISHED GENERATING");
+                                //let data: { tokens: string[], images: string[] } = await result2.json();
+
+                                //console.log(data.images.length)
+                                //console.log(data.tokens.length)
+                                //console.log(comparison_id)
+                                let base: String = format!(
+                                    "data/{}/{}",
+                                    front.data.comparison_id, front.data.generation_id
+                                );
+                                let _ = upload_png_b64(
+                                    &s3,
+                                    &bucket,
+                                    &format!("{base}/output.png"),
+                                    &res.images[0],
+                                )
+                                .await;
+                                let mut images: Vec<String> = Vec::with_capacity(res.images.len());
+
+                                for (idx, img_b64) in res.images.iter().enumerate().skip(1) {
+                                    let key = format!("{base}/{}.png", idx - 1);
+                                    let _ = upload_png_b64(&s3, &bucket, &key, &img_b64).await;
+                                    images.push(key);
+                                }
+                                let res = sqlx::query!(
+                                    r#"
+                                    UPDATE generation
+                                    SET output=$1, prompt=$2, options=$3, images=$4, tokens=$5
+                                    WHERE id=$6
+                                "#,
+                                    format!("{base}/output.png"),
+                                    front.data.prompt,
+                                    json!(front.data.options),
+                                    &images,
+                                    &res.tokens,
+                                    Uuid::parse_str(&front.data.generation_id).expect("ID was not a UUID")
+                                );
+                                if let Err(e) = res.execute(&db).await {
+                                    log::error!("{e}");
+                                }
+                                let err =
+                                    front.transmitter.send(ServerMsg::GenerationComplete).await;
+                                if let Err(err) = err {
+                                    log::error!("Error sending event: {err}");
+                                }
                             }
-                        }
-                        Err(e) => {
-                            match e {
+                            Err(e) => match e {
                                 GenerateErr::Generic { msg } => {
                                     log::error!("Error sending event: {msg}");
                                 }
-                            }
+                            },
                         }
                     }
-                })
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
-    rocket::build().manage(AppState { job_queue }).mount(
-        "/",
-        routes![
-            generate_request,
-            create_prompt,
-            create_gpt_prompt,
-            ws_connect
-        ],
-    )
+                }
+            });
+            rocket
+        }))
+        .mount("/", routes![create_prompt, create_gpt_prompt, ws_connect])
 }

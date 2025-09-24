@@ -72,10 +72,12 @@ def run(prompt="Image of cat sitting on a window sill", seed=482342374238978974,
     pipe = DiffusionPipeline.from_pretrained(
         model_id, use_auth_token=True, torch_dtype=torch.float16, use_safetensors=True, variant='fp16')
     pipe = pipe.to(device)
+    pipe.enable_attention_slicing()
+    pipe.enable_sequential_cpu_offload()
 
     gen = set_seed(seed)
     with trace(pipe) as tc:
-        pipe(prompt)
+        pipe(prompt, num_inference_steps=30)
         exp = tc.to_experiment(path)
         exp.save()
         write_token_map(path, prompt, pipe.tokenizer)
