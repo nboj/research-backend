@@ -34,6 +34,7 @@ use rocket::{
         time::interval,
     },
 };
+use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use uuid::Uuid;
 use ws::Message;
@@ -619,6 +620,7 @@ struct Generate {
 
 struct AppState {
     job_queue: Arc<RwLock<VecDeque<WSJob<Generate>>>>,
+    db: Pool<Postgres>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -649,18 +651,19 @@ struct WSJob<T> {
 #[get("/ws-connect")]
 async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'static> {
     let job_queue = state.job_queue.clone();
+    let db = state.db.clone();
     ws.channel(move |mut stream| {
         Box::pin(async move {
             let (mut sink, mut source) = stream.split();
             let (tx, mut rx) = channel::<ServerMsg>(128);
             tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
-                        let err = sink
-                            .send(Message::Text(json::to_string(&message).unwrap()))
-                            .await;
-                        if let Err(err) = err {
-                            log::error!("{err}");
-                        }
+                    let err = sink
+                        .send(Message::Text(json::to_string(&message).unwrap()))
+                        .await;
+                    if let Err(err) = err {
+                        log::error!("{err}");
+                    }
                 }
                 rx.close();
             });
@@ -678,6 +681,15 @@ async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'
                             log::info!("prompt={}", prompt);
                             {
                                 let mut job_queue_guard = job_queue.write().await;
+
+                                let res = sqlx::query!(
+                                    r#"
+                                    UPDATE generation
+                                    SET generating=true
+                                    WHERE id=$1
+                                "#, Uuid::parse_str(&generation_id).expect("ID was not a uuid"));
+                                _ = res.execute(&db).await;
+                                let _err = tx.send(ServerMsg::GenerationComplete).await;
                                 job_queue_guard.push_back(WSJob {
                                     job_id: Uuid::new_v4(),
                                     data: Generate {
@@ -733,8 +745,14 @@ async fn rocket() -> _ {
     log::info!("----- START -----");
     let job_queue = Arc::new(RwLock::new(VecDeque::<WSJob<Generate>>::new()));
     let job_queue_clone = job_queue.clone();
+
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+        .await
+        .expect("db connect");
     rocket::build()
-        .manage(AppState { job_queue })
+        .manage(AppState { job_queue, db })
         .attach(AdHoc::on_ignite("queue-worker", |rocket| async {
             tokio::spawn(async move {
                 let db = sqlx::postgres::PgPoolOptions::new()
@@ -791,11 +809,19 @@ async fn rocket() -> _ {
                                     json!(front.data.options),
                                     &images,
                                     &res.tokens,
-                                    Uuid::parse_str(&front.data.generation_id).expect("ID was not a UUID")
+                                    Uuid::parse_str(&front.data.generation_id)
+                                        .expect("ID was not a UUID")
                                 );
                                 if let Err(e) = res.execute(&db).await {
                                     log::error!("{e}");
                                 }
+                                let res = sqlx::query!(
+                                    r#"
+                                    UPDATE generation
+                                    SET generating=false
+                                    WHERE id=$1
+                                "#, Uuid::parse_str(&front.data.generation_id).expect("ID was not a uuid"));
+                                _ = res.execute(&db).await;
                                 let err =
                                     front.transmitter.send(ServerMsg::GenerationComplete).await;
                                 if let Err(err) = err {
