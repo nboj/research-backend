@@ -5,3 +5,4 @@ target/
 .direnv/
 .env
 .envrc
+.cargo
