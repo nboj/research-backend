@@ -1509,6 +1509,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenv",
  "env_logger",
+ "futures",
  "log",
  "rocket",
  "rocket_ws",

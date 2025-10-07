@@ -5,7 +5,7 @@ use std::{
     io::Error,
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_openai::{
@@ -14,25 +14,19 @@ use async_openai::{
 };
 use base64::{Engine, engine::general_purpose};
 use dotenv::dotenv;
+use futures::{stream, StreamExt}; // at top
 use rocket::{
-    State,
-    fairing::AdHoc,
-    futures::{SinkExt, StreamExt, executor::block_on},
-    http::{Status, ext::IntoCollection},
-    response::status,
-    serde::{
-        self, Deserialize, Serialize,
-        json::{self, Json, serde_json::json},
-    },
-    tokio::{
+    fairing::AdHoc, futures::{executor::block_on, SinkExt}, http::{ext::IntoCollection, Status}, response::status, serde::{
+        self, json::{self, serde_json::json, Json}, Deserialize, Serialize
+    }, tokio::{
         self,
         fs::{create_dir_all, read, read_dir, read_to_string, remove_dir_all},
+        select,
         sync::{
-            Mutex, RwLock,
-            mpsc::{Sender, channel},
+            mpsc::{channel, Sender}, Mutex, RwLock
         },
         time::interval,
-    },
+    }, State
 };
 use sqlx::{Pool, Postgres};
 use std::sync::Arc;
@@ -620,7 +614,7 @@ struct Generate {
 
 struct AppState {
     job_queue: Arc<RwLock<VecDeque<WSJob<Generate>>>>,
-    db: Pool<Postgres>
+    db: Pool<Postgres>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,65 +646,100 @@ struct WSJob<T> {
 async fn ws_connect(ws: ws::WebSocket, state: &State<AppState>) -> ws::Channel<'static> {
     let job_queue = state.job_queue.clone();
     let db = state.db.clone();
-    ws.channel(move |mut stream| {
+    ws.channel(move |stream| {
         Box::pin(async move {
             let (mut sink, mut source) = stream.split();
             let (tx, mut rx) = channel::<ServerMsg>(128);
-            tokio::spawn(async move {
-                while let Some(message) = rx.recv().await {
-                    let err = sink
-                        .send(Message::Text(json::to_string(&message).unwrap()))
-                        .await;
-                    if let Err(err) = err {
-                        log::error!("{err}");
-                    }
-                }
-                rx.close();
-            });
-            while let Some(frame) = source.next().await {
-                match frame {
-                    Ok(Message::Text(ref s)) => match json::from_str(s.as_str()) {
-                        Ok(ClientMsg::Generate {
-                            prompt,
-                            comparison_id,
-                            generation_id,
-                            userid,
-                            seed,
-                            options,
-                        }) => {
-                            log::info!("prompt={}", prompt);
-                            {
-                                let mut job_queue_guard = job_queue.write().await;
 
-                                let res = sqlx::query!(
-                                    r#"
-                                    UPDATE generation
-                                    SET generating=true
-                                    WHERE id=$1
-                                "#, Uuid::parse_str(&generation_id).expect("ID was not a uuid"));
-                                _ = res.execute(&db).await;
-                                let _err = tx.send(ServerMsg::GenerationComplete).await;
-                                job_queue_guard.push_back(WSJob {
-                                    job_id: Uuid::new_v4(),
-                                    data: Generate {
+            // Heartbeat config
+            let mut ping_ticker = interval(Duration::from_secs(30));
+            let mut last_pong = Instant::now();
+            let pong_deadline = Duration::from_secs(90);
+
+            loop {
+                select! {
+                    _ = ping_ticker.tick() => {
+                        if let Err(e) = sink.send(Message::Ping(Vec::new())).await {
+                            log::error!("failed to send Ping: {e}");
+                            break;
+                        }
+                        if last_pong.elapsed() > pong_deadline {
+                            log::warn!("no Pong in {:?}; closing", pong_deadline);
+                            let _ = sink.send(Message::Close(None)).await;
+                            break;
+                        }
+                    },
+                    maybe_msg = source.next() => {
+                        if let Some(frame) = maybe_msg{
+                            match frame {
+                                Ok(Message::Pong(_payload)) => {
+                                    // Browser auto-responds to Ping; just mark alive.
+                                    last_pong = Instant::now();
+                                }
+                                Ok(Message::Ping(payload)) => {
+                                    // Be nice to non-browser clients: reply to their Ping.
+                                    let _ = sink.send(Message::Pong(payload)).await;
+                                }
+                                Ok(Message::Text(ref s)) => match json::from_str(s.as_str()) {
+                                    Ok(ClientMsg::Generate {
                                         prompt,
                                         comparison_id,
                                         generation_id,
                                         userid,
                                         seed,
                                         options,
-                                    },
-                                    transmitter: tx.clone(),
-                                });
+                                    }) => {
+                                        log::info!("prompt={}", prompt);
+                                        {
+
+                                            let res = sqlx::query!(
+                                                r#"
+                                                UPDATE generation
+                                                SET generating=true
+                                                WHERE id=$1
+                                            "#, Uuid::parse_str(&generation_id).expect("ID was not a uuid"));
+                                            _ = res.execute(&db).await;
+                                            let _err = tx.send(ServerMsg::GenerationComplete).await;
+                                            let mut job_queue_guard = job_queue.write().await;
+                                            job_queue_guard.push_back(WSJob {
+                                                job_id: Uuid::new_v4(),
+                                                data: Generate {
+                                                    prompt,
+                                                    comparison_id,
+                                                    generation_id,
+                                                    userid,
+                                                    seed,
+                                                    options,
+                                                },
+                                                transmitter: tx.clone(),
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        log::error!("Unhandled message type: {}", frame.unwrap());
+                                    }
+                                },
+                                _ => {}
                             }
-                        }
-                        _ => {
-                            log::error!("Unhandled message type: {}", frame.unwrap());
+                        } else {
+                            break;
                         }
                     },
-                    _ => {}
+                    maybe_server_msg = rx.recv() => {
+                        if let Some(message) = maybe_server_msg {
+                            let err = sink
+                                .send(Message::Text(json::to_string(&message).unwrap()))
+                                .await;
+                            if let Err(err) = err {
+                                log::error!("{err}");
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
+            //while let Some(frame) = source.next().await {}
             Ok(())
         })
     })
@@ -784,6 +813,7 @@ async fn rocket() -> _ {
                                     "data/{}/{}",
                                     front.data.comparison_id, front.data.generation_id
                                 );
+                                let max_concurrency = 8usize;
                                 let _ = upload_png_b64(
                                     &s3,
                                     &bucket,
@@ -791,11 +821,35 @@ async fn rocket() -> _ {
                                     &res.images[0],
                                 )
                                 .await;
-                                let mut images: Vec<String> = Vec::with_capacity(res.images.len());
+                                //let mut images: Vec<String> = Vec::with_capacity(res.images.len());
 
-                                for (idx, img_b64) in res.images.iter().enumerate().skip(1) {
-                                    let key = format!("{base}/{}.png", idx - 1);
-                                    let _ = upload_png_b64(&s3, &bucket, &key, &img_b64).await;
+                                //for (idx, img_b64) in res.images.iter().enumerate().skip(1) {
+                                //    let key = format!("{base}/{}.png", idx - 1);
+                                //    let _ = upload_png_b64(&s3, &bucket, &key, &img_b64).await;
+                                //    images.push(key);
+                                //}
+                                let mut uploads = stream::iter(
+                                    res.images.into_iter().enumerate().skip(1).map(|(idx, img_b64)| {
+                                        let s3 = s3.clone();
+                                        let bucket = bucket.clone();
+                                        let key = format!("{base}/{}.png", idx - 1);
+                                        let img_b64 = img_b64.clone();
+                                        async move {
+                                            let r = upload_png_b64(&s3, &bucket, &key, &img_b64).await;
+                                            (idx, key, r)
+                                        }
+                                    })
+                                ).buffer_unordered(max_concurrency);
+                                let mut staged: Vec<(usize, String)> = Vec::new();
+                                while let Some((idx, key, r)) = uploads.next().await {
+                                    match r {
+                                        Ok(()) => staged.push((idx, key)),
+                                        Err(e) => log::error!("upload error: {e}"),
+                                    }
+                                }
+                                staged.sort_by_key(|(idx, _)| *idx);
+                                let mut images: Vec<String> = Vec::with_capacity(staged.len());
+                                for (_idx, key) in staged {
                                     images.push(key);
                                 }
                                 let res = sqlx::query!(
@@ -820,7 +874,10 @@ async fn rocket() -> _ {
                                     UPDATE generation
                                     SET generating=false
                                     WHERE id=$1
-                                "#, Uuid::parse_str(&front.data.generation_id).expect("ID was not a uuid"));
+                                "#,
+                                    Uuid::parse_str(&front.data.generation_id)
+                                        .expect("ID was not a uuid")
+                                );
                                 _ = res.execute(&db).await;
                                 let err =
                                     front.transmitter.send(ServerMsg::GenerationComplete).await;
